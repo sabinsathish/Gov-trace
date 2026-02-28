@@ -1,19 +1,357 @@
-<!doctype html>
-<html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>GovTrace — Ward-Level Governance Transparency</title>
-    <meta name="description" content="Ward-level governance transparency dashboard for Karnataka State. Track budget allocations, fund utilization, grievances and governance scores." />
-    <meta name="author" content="GovTrace" />
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Scheme Eligibility Checker (Robust)</title>
+  <style>
+    body { font-family: Arial; margin: 28px; }
+    .container { max-width: 900px; margin: auto; }
+    input, select, textarea, button { margin: 8px 0; padding: 10px; width: 100%; box-sizing: border-box; }
+    button { background: #2563eb; color: white; border: none; cursor: pointer; border-radius: 8px; }
+    button.secondary { background: #16a34a; }
+    .row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    .card { border: 1px solid #e5e7eb; border-radius: 12px; padding: 14px; margin: 14px 0; }
+    .scheme { border: 1px solid #ddd; padding: 12px; margin: 10px 0; border-radius: 10px; }
+    .hidden { display: none; }
+    .ok { color: #16a34a; }
+    .err { color: #dc2626; }
+    small { color: #6b7280; }
+    label { font-weight: 600; display: block; margin-top: 6px; }
+    .tag { display:inline-block; padding: 4px 8px; border-radius: 999px; font-size: 12px; }
+    .tag.ok { background:#dcfce7; color:#166534; }
+    .tag.bad { background:#fee2e2; color:#991b1b; }
+    .tag.wait { background:#fef9c3; color:#854d0e; }
+    ul { margin: 6px 0 0 18px; }
+  </style>
+</head>
+<body>
+<div class="container">
+  <h1>Scheme Eligibility Checker</h1>
+  <p><small>Load schemes from .docx/.txt/.pdf/.json or paste text/json. Extra questions will be generated only from scheme rules.</small></p>
 
-    <meta property="og:title" content="GovTrace — Ward-Level Governance Transparency" />
-    <meta property="og:description" content="Ward-level governance transparency dashboard for Karnataka State." />
-    <meta property="og:type" content="website" />
-  </head>
+  <div class="card">
+    <h2>1) Load schemes</h2>
 
-  <body>
-    <div id="root"></div>
-    <script type="module" src="/src/main.tsx"></script>
-  </body>
+    <label>Upload a file (.docx / .txt / .pdf / .json)</label>
+    <input type="file" id="fileInput" />
+
+    <div class="row">
+      <div>
+        <label>Or paste text (scheme descriptions)</label>
+        <textarea id="pasteText" rows="6" placeholder="Paste scheme text here..."></textarea>
+      </div>
+      <div>
+        <label>Or paste JSON array of schemes</label>
+        <textarea id="pasteJson" rows="6" placeholder='[{"scheme_name":"...", "criteria":{...}, "benefits":"..."}]'></textarea>
+      </div>
+    </div>
+
+    <button class="secondary" onclick="loadSchemes()">Load Schemes</button>
+    <p id="loadStatus"></p>
+  </div>
+
+  <div class="card">
+    <h2>2) Basic info</h2>
+    <p><small>Minimal basics. Other questions will appear only if required by scheme criteria.</small></p>
+
+    <div class="row">
+      <div>
+        <label>Age</label>
+        <input id="age" type="number" min="0" max="120" placeholder="Enter age" />
+
+        <label>Gender</label>
+        <select id="gender">
+          <option value="">Select</option>
+          <option value="Male">Male</option>
+          <option value="Female">Female</option>
+          <option value="Other">Other</option>
+        </select>
+
+        <label>Residence type</label>
+        <select id="residence_type">
+          <option value="">Select</option>
+          <option value="Rural">Rural</option>
+          <option value="Urban">Urban</option>
+        </select>
+
+        <label>Disability?</label>
+        <select id="disability">
+          <option value="">Select</option>
+          <option value="true">Yes</option>
+          <option value="false">No</option>
+        </select>
+
+        <label>Disability percentage (if yes)</label>
+        <input id="disability_percentage" type="number" min="0" max="100" placeholder="0 - 100" />
+      </div>
+
+      <div>
+        <label>Annual Income (₹)</label>
+        <input id="income" type="number" min="0" placeholder="e.g., 200000" />
+
+        <label>BPL Status</label>
+        <select id="bpl">
+          <option value="">Select</option>
+          <option value="true">Yes (BPL)</option>
+          <option value="false">No (APL)</option>
+        </select>
+
+        <label>Category</label>
+        <select id="category">
+          <option value="">Select</option>
+          <option value="General">General</option>
+          <option value="OBC">OBC</option>
+          <option value="SC">SC</option>
+          <option value="ST">ST</option>
+        </select>
+
+        <button onclick="checkEligibility()">Check Eligibility</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="extraQuestions" class="card hidden">
+    <h2>3) Additional questions (from scheme rules only)</h2>
+    <p><small>Options come from the eligibility constraints of schemes still possible.</small></p>
+    <div id="extraFields"></div>
+    <button class="secondary" onclick="checkEligibilityWithExtra()">Re-check with Additional Info</button>
+  </div>
+
+  <div class="card">
+    <h2>Results</h2>
+    <div id="results"></div>
+  </div>
+</div>
+
+<script>
+  let lastMissingQuestions = [];
+
+  function setStatus(el, text, ok=true) {
+    el.className = ok ? "ok" : "err";
+    el.innerText = text;
+  }
+
+  async function loadSchemes() {
+    const status = document.getElementById("loadStatus");
+    setStatus(status, "Loading schemes...", true);
+
+    const file = document.getElementById("fileInput").files[0];
+    const pasteText = document.getElementById("pasteText").value.trim();
+    const pasteJson = document.getElementById("pasteJson").value.trim();
+
+    const form = new FormData();
+    if (file) form.append("file", file);
+    if (pasteText) form.append("paste_text", pasteText);
+    if (pasteJson) form.append("paste_json", pasteJson);
+
+    const res = await fetch("/load_schemes", { method: "POST", body: form });
+    const data = await res.json();
+
+    if (!res.ok) {
+      setStatus(status, "❌ " + (data.error || "Failed to load schemes"), false);
+      return;
+    }
+    setStatus(status, `✅ ${data.message}`, true);
+  }
+
+  function getPayloadBase() {
+    return {
+      age: document.getElementById("age").value,
+      income: document.getElementById("income").value,
+      bpl: document.getElementById("bpl").value,
+      category: document.getElementById("category").value,
+      gender: document.getElementById("gender").value,
+      residence_type: document.getElementById("residence_type").value,
+      disability: document.getElementById("disability").value,
+      disability_percentage: document.getElementById("disability_percentage").value
+    };
+  }
+
+  async function checkEligibility() {
+    const payload = getPayloadBase();
+    const res = await fetch("/check", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    });
+
+    const data = await res.json();
+    renderAllResults(data);
+
+    lastMissingQuestions = data.missing_questions || [];
+    if (lastMissingQuestions.length) showExtraQuestions(lastMissingQuestions);
+    else hideExtraQuestions();
+  }
+
+  async function checkEligibilityWithExtra() {
+    const payload = getPayloadBase();
+    const extra = {};
+
+    lastMissingQuestions.forEach(q => {
+      const key = q.key;
+      const el = document.getElementById("extra_" + key);
+      if (!el) return;
+
+      let v = el.value;
+
+      if (q.data_type === "bool") {
+        if (v === "true") v = true;
+        else if (v === "false") v = false;
+        else v = null;
+      } else if (q.data_type === "number") {
+        v = (v === "" ? null : Number(v));
+      } else {
+        v = (v || "").trim();
+        if (v === "") v = null;
+      }
+
+      extra[key] = v;
+    });
+
+    payload.extra = extra;
+
+    const res = await fetch("/check", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    });
+
+    const data = await res.json();
+    renderAllResults(data);
+
+    lastMissingQuestions = data.missing_questions || [];
+    if (lastMissingQuestions.length) showExtraQuestions(lastMissingQuestions);
+    else hideExtraQuestions();
+  }
+
+  function showExtraQuestions(questions) {
+    const container = document.getElementById("extraQuestions");
+    const extraFields = document.getElementById("extraFields");
+    extraFields.innerHTML = "";
+
+    questions.forEach(q => {
+      const label = document.createElement("label");
+      label.htmlFor = "extra_" + q.key;
+      label.innerText = q.question || q.key;
+
+      extraFields.appendChild(label);
+
+      let input;
+      if (q.input_type === "select") {
+        input = document.createElement("select");
+
+        const placeholder = document.createElement("option");
+        placeholder.value = "";
+        placeholder.text = "Select";
+        input.appendChild(placeholder);
+
+        (q.options || []).forEach(optVal => {
+          const opt = document.createElement("option");
+          if (q.data_type === "bool") {
+            const low = String(optVal).toLowerCase();
+            if (low === "yes") opt.value = "true";
+            else if (low === "no") opt.value = "false";
+            else opt.value = optVal;
+            opt.text = optVal;
+          } else {
+            opt.value = optVal;
+            opt.text = optVal;
+          }
+          input.appendChild(opt);
+        });
+      } else if (q.input_type === "number") {
+        input = document.createElement("input");
+        input.type = "number";
+        if (q.min !== undefined) input.min = q.min;
+        if (q.max !== undefined) input.max = q.max;
+        input.placeholder = (q.min !== undefined || q.max !== undefined)
+          ? `Enter value (${q.min ?? "-∞"} to ${q.max ?? "∞"})`
+          : "Enter value";
+      } else {
+        input = document.createElement("input");
+        input.type = "text";
+        input.placeholder = "Enter value";
+      }
+
+      input.id = "extra_" + q.key;
+      extraFields.appendChild(input);
+    });
+
+    container.classList.remove("hidden");
+  }
+
+  function hideExtraQuestions() {
+    document.getElementById("extraQuestions").classList.add("hidden");
+  }
+
+  function renderAllResults(data) {
+    const eligible = data.eligible_schemes || [];
+    const notEligible = data.not_eligible_schemes || [];
+
+    const results = document.getElementById("results");
+    results.innerHTML = "";
+
+    // Eligible list
+    const eTitle = document.createElement("h3");
+    eTitle.innerText = "Eligible schemes";
+    results.appendChild(eTitle);
+
+    if (!eligible.length) {
+      const p = document.createElement("p");
+      p.innerText = "No eligible schemes yet with current info.";
+      results.appendChild(p);
+    } else {
+      eligible.forEach(s => {
+        const div = document.createElement("div");
+        div.className = "scheme";
+        div.innerHTML = `
+          <div><span class="tag ok">Eligible</span></div>
+          <h3>${escapeHtml(s.scheme_name || "Scheme")}</h3>
+          <p>${escapeHtml(s.benefits || "")}</p>
+        `;
+        results.appendChild(div);
+      });
+    }
+
+    // Not eligible list + reasons
+    const nTitle = document.createElement("h3");
+    nTitle.style.marginTop = "16px";
+    nTitle.innerText = "Not eligible (with reasons)";
+    results.appendChild(nTitle);
+
+    if (!notEligible.length) {
+      const p = document.createElement("p");
+      p.innerText = "No schemes marked as not eligible (either eligible or need more info).";
+      results.appendChild(p);
+    } else {
+      notEligible.forEach(s => {
+        const div = document.createElement("div");
+        div.className = "scheme";
+
+        const reasons = Array.isArray(s.reasons) ? s.reasons : [];
+        const reasonsHtml = reasons.length
+          ? `<ul>${reasons.map(r => `<li>${escapeHtml(r)}</li>`).join("")}</ul>`
+          : `<p>No reason details available.</p>`;
+
+        div.innerHTML = `
+          <div><span class="tag bad">Not eligible</span></div>
+          <h3>${escapeHtml(s.scheme_name || "Scheme")}</h3>
+          <p><strong>Why not eligible:</strong></p>
+          ${reasonsHtml}
+          ${s.benefits ? `<p><small><strong>Benefits (for reference):</strong> ${escapeHtml(s.benefits)}</small></p>` : ""}
+        `;
+        results.appendChild(div);
+      });
+    }
+  }
+
+  function escapeHtml(str) {
+    return String(str)
+      .replaceAll("&","&amp;")
+      .replaceAll("<","&lt;")
+      .replaceAll(">","&gt;")
+      .replaceAll('"',"&quot;")
+      .replaceAll("'","&#039;");
+  }
+</script>
+</body>
 </html>
